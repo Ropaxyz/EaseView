@@ -1,7 +1,9 @@
 # EaseView
 
 A lightweight Windows screen colour overlay application designed to improve on-screen readability and visual comfort.
+
 ![EaseView Application Interface](screenshots/app-ui.png)
+
 EaseView provides a fullscreen, click-through colour overlay with adjustable strength and density, making it ideal for accessibility support, exam arrangements, and prolonged screen use. The application runs quietly in the background, integrates with the system tray, and automatically restores user settings between sessions.
 
 ## Features
@@ -122,4 +124,5 @@ See [LICENSE](LICENSE) for full details.
 ## Author
 
 **Ross Paxton**
+
 
