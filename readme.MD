@@ -1,168 +1,124 @@
-```markdown
 # EaseView
 
-EaseView is a lightweight Windows screen colour overlay application designed to improve on-screen readability and visual comfort. It provides a fullscreen, click-through colour overlay with adjustable strength and colour density, making it suitable for accessibility support, exam arrangements, and prolonged screen use.
+A lightweight Windows screen colour overlay application designed to improve on-screen readability and visual comfort.
 
-The application runs in the background, integrates with the system tray, and automatically restores user settings between sessions.
-
----
+EaseView provides a fullscreen, click-through colour overlay with adjustable strength and density, making it ideal for accessibility support, exam arrangements, and prolonged screen use. The application runs quietly in the background, integrates with the system tray, and automatically restores user settings between sessions.
 
 ## Features
 
-### Core Features
-- **Multi-monitor support** - Overlay works across all displays
+**Core**
+- Multi-monitor support across all displays
 - Fullscreen, click-through colour overlay
 - Preset and custom overlay colours
-- Adjustable overlay strength (opacity)
-- Colour density control
+- Adjustable overlay strength (opacity) and colour density
 - Keyboard shortcuts for quick access
-- System tray integration
-- Persistent user settings
-- Keyboard-accessible interface
-- Windows-native styling
+- System tray integration with persistent settings
+- Keyboard-accessible, Windows-native interface
 
-### Advanced Features
-- **Single instance enforcement** - Prevents multiple app instances
-- **Settings profiles** - Save and load different configurations
-- **Export/Import settings** - Share configurations between installations
-- **Windows startup integration** - Option to start with Windows
-- **Scheduled overlay** - Automatically enable/disable on schedule
-- **Hotkey customization** - Customize keyboard shortcuts (requires keyboard library)
-- **Dark mode support** - Automatically adapts to Windows theme
-- **Portable mode** - Store settings in application directory
-- **Accessibility options** - High contrast mode and font scaling
-- **Update checker** - Check for new versions
-- **Window position persistence** - Remembers window location and size
-- **Overlay monitoring** - Auto-recovery if overlay is destroyed
-- **Asynchronous logging** - Non-blocking log file writes
-
----
+**Advanced**
+- Single instance enforcement
+- Settings profiles with export/import functionality
+- Windows startup integration
+- Scheduled overlay (auto enable/disable)
+- Customisable hotkeys (requires `keyboard` library)
+- Dark mode support (adapts to Windows theme)
+- Portable mode (store settings in application directory)
+- Accessibility options (high contrast, font scaling)
+- Update checker
+- Window position persistence
+- Overlay monitoring with auto-recovery
+- Asynchronous logging
 
 ## System Requirements
 
 - Windows 10 or Windows 11
-- Python 3.9 or later
+- Python 3.9+
 
----
+## Installation
 
-## Dependencies
-
-### Required
+### Required Dependencies
 ```bash
 pip install pystray pillow
 ```
 
-### Optional (for enhanced features)
+### Optional Dependencies
 ```bash
 pip install pywin32 keyboard requests
 ```
 
-- `pystray` - System tray integration
-- `pillow` - Image processing for tray icon
-- `pywin32` - Windows API integration (multi-monitor, startup, dark mode detection)
-- `keyboard` - Global hotkey support (optional)
-- `requests` - Update checking (optional)
+| Package | Purpose |
+|---------|---------|
+| `pystray` | System tray integration |
+| `pillow` | Image processing for tray icon |
+| `pywin32` | Windows API (multi-monitor, startup, dark mode) |
+| `keyboard` | Global hotkey support |
+| `requests` | Update checking |
 
-tkinter is included with standard Python installations on Windows.
+> **Note:** `tkinter` is included with standard Python installations on Windows.
 
----
-
-## Running the Application
-
+## Usage
+```bash
 python screen_overlay.py
-
----
+```
 
 ## Keyboard Shortcuts
 
-Ctrl + Shift + O  Toggle overlay on or off  
-Ctrl + Shift + Up  Increase overlay strength  
-Ctrl + Shift + Down  Decrease overlay strength  
-Ctrl + Shift + Right  Increase colour density  
-Ctrl + Shift + Left  Decrease colour density  
-Escape  Hide overlay  
+| Shortcut | Action |
+|----------|--------|
+| `Ctrl + Shift + O` | Toggle overlay on/off |
+| `Ctrl + Shift + ↑` | Increase overlay strength |
+| `Ctrl + Shift + ↓` | Decrease overlay strength |
+| `Ctrl + Shift + →` | Increase colour density |
+| `Ctrl + Shift + ←` | Decrease colour density |
+| `Escape` | Hide overlay (emergency) |
 
----
+Custom hotkeys can be configured in **Settings → Hotkey Settings** (requires `keyboard` library).
 
 ## Project Structure
-
-screen_overlay.py  
-.easeview_settings.json  
-.easeview.log  
-
----
+```
+EaseView/
+├── screen_overlay.py
+├── .easeview_settings.json
+├── .easeview.log
+└── .easeview_profiles/
+```
 
 ## Building an Executable
-
+```bash
 pyinstaller --onefile --windowed screen_overlay.py
+```
 
 Optional icon files:
-
-app_icon.ico  
-tray_icon.png  
-
----
+- `app_icon.ico`
+- `tray_icon.png`
 
 ## Settings Profiles
 
-EaseView supports saving and loading configuration profiles. Access profiles from the File menu:
-- **Save Current as Profile** - Save current settings as a named profile
-- **Load Profile** - Load a previously saved profile
-- **Manage Profiles** - View and delete saved profiles
+EaseView supports saving and loading configuration profiles via the **File** menu:
 
-Profiles are stored in `.easeview_profiles/` directory.
+- **Save Current as Profile** – Save current settings as a named profile
+- **Load Profile** – Load a previously saved profile
+- **Manage Profiles** – View and delete saved profiles
+
+Profiles are stored in the `.easeview_profiles/` directory.
 
 ## Portable Mode
 
-To run EaseView in portable mode, create a file named `portable.ini` in the same directory as the executable. In portable mode, all settings and profiles are stored in the application directory instead of the user home directory.
-
-## Keyboard Shortcuts
-
-- `Ctrl + Shift + O` - Toggle overlay on or off
-- `Ctrl + Shift + Up` - Increase overlay strength
-- `Ctrl + Shift + Down` - Decrease overlay strength
-- `Ctrl + Shift + Right` - Increase colour density
-- `Ctrl + Shift + Left` - Decrease colour density
-- `Escape` - Hide overlay (emergency)
-
-Custom hotkeys can be configured in Settings > Hotkey Settings (requires keyboard library).
+Create a file named `portable.ini` in the same directory as the executable. In portable mode, all settings and profiles are stored in the application directory instead of the user home directory.
 
 ## Known Limitations
 
 - Windows only
 - Some fullscreen applications may override the overlay
-- Global hotkeys require administrator privileges (keyboard library limitation)
-- Multi-monitor support requires pywin32 for optimal detection
-
----
+- Global hotkeys require administrator privileges (`keyboard` library limitation)
+- Multi-monitor support requires `pywin32` for optimal detection
 
 ## License
 
-MIT License
+MIT License © 2026 Ross Paxton
 
-Copyright (c) 2026 Ross Paxton
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
----
+See [LICENSE](LICENSE) for full details.
 
 ## Author
 
-Ross Paxton  
-
+**Ross Paxton**
