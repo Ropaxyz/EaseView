@@ -603,6 +603,7 @@ class SettingsManager:
         },
         'auto_startup': False,
         'start_minimized': False,
+        'minimize_to_tray': False,  # When enabled, minimize hides window to tray
         'enable_notifications': True,
         'enable_fade': True,
         'schedule': {
@@ -690,6 +691,9 @@ class SettingsManager:
                 settings['schedule'].setdefault('location', self.DEFAULT_SETTINGS['schedule']['location'].copy())
             settings.setdefault('auto_backup', True)
             settings.setdefault('backup_interval_hours', 24)
+        # Add minimize_to_tray setting (defaults to False for existing users)
+        if 'minimize_to_tray' not in settings:
+            settings.setdefault('minimize_to_tray', False)
         settings['version'] = SETTINGS_VERSION
         logger.info(f"Migrated settings from v{from_version} to v{SETTINGS_VERSION}")
         return settings
@@ -1938,12 +1942,13 @@ class EaseViewApp:
         """Dialog for startup options."""
         dialog = tk.Toplevel(self.root)
         dialog.title("Startup Options")
-        dialog.geometry("350x180")
+        dialog.geometry("350x220")
         dialog.transient(self.root)
         dialog.grab_set()
         
         auto_startup_var = tk.BooleanVar(value=self.settings.get('auto_startup', False))
         start_minimized_var = tk.BooleanVar(value=self.settings.get('start_minimized', False))
+        minimize_to_tray_var = tk.BooleanVar(value=self.settings.get('minimize_to_tray', False))
         
         tk.Label(dialog, text="Windows Startup:", font=FONTS['section']).pack(pady=10)
         
@@ -1953,9 +1958,13 @@ class EaseViewApp:
         tk.Checkbutton(dialog, text="Start minimized to tray", variable=start_minimized_var,
                       font=FONTS['body']).pack(pady=5, anchor='w', padx=20)
         
+        tk.Checkbutton(dialog, text="Minimize to tray when minimized", variable=minimize_to_tray_var,
+                      font=FONTS['body']).pack(pady=5, anchor='w', padx=20)
+        
         def save():
             self.settings.set('auto_startup', auto_startup_var.get())
             self.settings.set('start_minimized', start_minimized_var.get())
+            self.settings.set('minimize_to_tray', minimize_to_tray_var.get())
             WindowsIntegration.set_startup(auto_startup_var.get())
             messagebox.showinfo("Success", "Startup settings saved.")
             dialog.destroy()
@@ -2174,9 +2183,12 @@ class EaseViewApp:
         self.root.withdraw()
 
     def _on_window_minimize(self, event=None):
-        """Handle window minimize - ensure it's hidden."""
+        """Handle window minimize - hide to tray only if setting is enabled."""
         if event and event.widget == self.root:
-            self.root.withdraw()
+            # Only hide to tray if the setting is enabled
+            if self.settings.get('minimize_to_tray', False):
+                self.root.withdraw()
+            # Otherwise, allow normal minimize (do nothing)
 
     def _restore_overlay_state(self):
         """Restore overlay state from settings on startup."""
