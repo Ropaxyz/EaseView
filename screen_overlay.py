@@ -2179,8 +2179,14 @@ class EaseViewApp:
         self.root.after(100, lambda: self.root.attributes('-topmost', False))
 
     def _on_window_close(self):
-        """Handle window close - hide to tray instead of closing."""
-        self.root.withdraw()
+        """Handle window close - properly quit if overlay is active, otherwise hide to tray."""
+        # If overlay is active, we need to properly quit to clean up overlay
+        if self.overlay.is_active:
+            # Overlay is running, need to properly quit to destroy it
+            self.quit_app()
+        else:
+            # No overlay active, safe to hide to tray
+            self.root.withdraw()
 
     def _on_window_minimize(self, event=None):
         """Handle window minimize - hide to tray only if setting is enabled."""
@@ -2229,7 +2235,7 @@ class EaseViewApp:
         self.root.geometry(f"{WINDOW['width']}x{WINDOW['height']}")
         self.root.configure(bg=COLOURS['background'])
         self.root.resizable(True, True)
-        self.root.eval('tk::PlaceWindow . center')
+        # Window positioning is handled by _restore_window_geometry() after UI setup
 
         # ====================================================================
         # HEADER
@@ -2623,20 +2629,84 @@ class EaseViewApp:
         self._density_save_timer = self.root.after(500, self.settings.save_pending)
 
     def _restore_window_geometry(self):
-        """Restore window position and size from settings."""
+        """Restore window position and size from settings, with validation and centering."""
         try:
             geometry = self.settings.get('window_geometry', {})
+            
+            # Get primary monitor info for validation
+            monitors = MonitorDetector.get_monitors()
+            primary_monitor = monitors[0] if monitors else None
+            
+            if primary_monitor:
+                work_x = primary_monitor.get('work_x', 0)
+                work_y = primary_monitor.get('work_y', 0)
+                work_width = primary_monitor.get('work_width', 1920)
+                work_height = primary_monitor.get('work_height', 1080)
+            else:
+                # Fallback to screen dimensions
+                work_x = 0
+                work_y = 0
+                work_width = self.root.winfo_screenwidth()
+                work_height = self.root.winfo_screenheight()
+            
+            # Validate and restore geometry
             if geometry and geometry.get('x') is not None and geometry.get('y') is not None:
                 width = geometry.get('width', WINDOW['width'])
                 height = geometry.get('height', WINDOW['height'])
                 x = geometry.get('x')
                 y = geometry.get('y')
-                self.root.geometry(f"{width}x{height}+{x}+{y}")
+                
+                # Ensure window size doesn't exceed screen
+                width = min(width, work_width)
+                height = min(height, work_height)
+                
+                # Validate position is on screen
+                # Check if window is at least partially visible on any monitor
+                is_valid = False
+                for monitor in monitors:
+                    monitor_x = monitor.get('x', 0)
+                    monitor_y = monitor.get('y', 0)
+                    monitor_width = monitor.get('width', 1920)
+                    monitor_height = monitor.get('height', 1080)
+                    
+                    # Check if window overlaps with monitor
+                    if (x < monitor_x + monitor_width and x + width > monitor_x and
+                        y < monitor_y + monitor_height and y + height > monitor_y):
+                        is_valid = True
+                        break
+                
+                if is_valid:
+                    # Position is valid, use it
+                    self.root.geometry(f"{width}x{height}+{x}+{y}")
+                else:
+                    # Position is invalid, center on primary monitor
+                    center_x = work_x + (work_width - width) // 2
+                    center_y = work_y + (work_height - height) // 2
+                    self.root.geometry(f"{width}x{height}+{center_x}+{center_y}")
+            else:
+                # No saved geometry, center on primary monitor
+                width = WINDOW['width']
+                height = WINDOW['height']
+                center_x = work_x + (work_width - width) // 2
+                center_y = work_y + (work_height - height) // 2
+                self.root.geometry(f"{width}x{height}+{center_x}+{center_y}")
             
             # Save geometry on window move/resize
             self.root.bind('<Configure>', self._on_window_configure)
         except Exception as e:
             logger.warning(f"Failed to restore window geometry: {e}")
+            # Fallback: center window
+            try:
+                self.root.update_idletasks()
+                width = WINDOW['width']
+                height = WINDOW['height']
+                screen_width = self.root.winfo_screenwidth()
+                screen_height = self.root.winfo_screenheight()
+                center_x = (screen_width - width) // 2
+                center_y = (screen_height - height) // 2
+                self.root.geometry(f"{width}x{height}+{center_x}+{center_y}")
+            except Exception:
+                pass
     
     def _on_window_configure(self, event=None):
         """Save window geometry when moved or resized."""
