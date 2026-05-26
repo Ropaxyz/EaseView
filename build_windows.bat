@@ -1,32 +1,41 @@
 @echo off
-echo Cleaning up previous builds...
-:: These lines delete the old temporary folders and spec file
+setlocal ENABLEDELAYEDEXPANSION
+
+echo Cleaning build folders...
 if exist build rmdir /s /q build
-if exist dist rmdir /s /q dist
-if exist EaseView.spec del EaseView.spec
+if exist dist  rmdir /s /q dist
 
-echo.
-echo Installing required packages...
-pip install pillow pystray pyinstaller
+echo Installing dependencies...
+python -m pip install --upgrade pip
+python -m pip install --upgrade -r requirements.txt
+if errorlevel 1 (
+    echo Dependency install failed.
+    exit /b 1
+)
 
-echo.
-echo Creating professional icons...
-:: Make sure this script actually runs and produces app_icon.ico
-if exist create_icons.py (
-    python create_icons.py
+echo Running tests...
+python -m unittest test_screen_overlay -v
+if errorlevel 1 (
+    echo Tests failed, not building.
+    exit /b 1
+)
+
+echo Building EaseView.exe...
+if exist EaseView.spec (
+    python -m PyInstaller --noconfirm --clean EaseView.spec
 ) else (
-    echo create_icons.py not found, skipping icon creation...
+    python -m PyInstaller --noconfirm --clean ^
+        --onefile --windowed --name "EaseView" ^
+        --icon=app_icon.ico ^
+        --add-data "app_icon.ico;." ^
+        --add-data "tray_icon.png;." ^
+        screen_overlay.py
+)
+if errorlevel 1 (
+    echo Build failed.
+    exit /b 1
 )
 
 echo.
-echo Building EaseView executable...
-:: Note: I removed the quotes around the icon path just in case, and added --clean
-pyinstaller --noconfirm --onefile --windowed --clean --name "EaseView" ^
-    --icon=app_icon.ico ^
-    --add-data "app_icon.ico;." ^
-    --add-data "tray_icon.png;." ^
-    screen_overlay.py
-
-echo.
-echo Build complete! 
+echo Done. Output: dist\EaseView.exe
 pause

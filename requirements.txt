@@ -1,8 +1,9 @@
 pystray>=0.19.0
-Pillow>=9.0.0
-pyinstaller>=5.0.0
-pywin32>=305
+Pillow>=10.0.0
+
+pywin32>=305; sys_platform == "win32"
 keyboard>=0.13.5
 requests>=2.31.0
-win10toast>=0.9
 astral>=3.2
+
+pyinstaller>=6.0.0

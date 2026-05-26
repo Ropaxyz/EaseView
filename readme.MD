@@ -1,128 +1,102 @@
 # EaseView
 
-A lightweight Windows screen colour overlay application designed to improve on-screen readability and visual comfort.
+A small Windows app that puts a coloured tint over the screen to help with reading and visual comfort.
 
-![EaseView Application Interface](screenshots/app-ui.png)
+![EaseView](screenshots/app-ui.png)
 
-EaseView provides a fullscreen, click-through colour overlay with adjustable strength and density, making it ideal for accessibility support, exam arrangements, and prolonged screen use. The application runs quietly in the background, integrates with the system tray, and automatically restores user settings between sessions.
+It covers every monitor with a click-through overlay you can tweak for strength and density. Sits in the system tray, remembers its settings, copes with monitors being plugged in and unplugged, and supports custom hotkeys.
 
 ## Features
 
-**Core**
-- Multi-monitor support across all displays
-- Fullscreen, click-through colour overlay
-- Preset and custom overlay colours
-- Adjustable overlay strength (opacity) and colour density
-- Keyboard shortcuts for quick access
-- System tray integration with persistent settings
-- Keyboard-accessible, Windows-native interface
+- Multi-monitor overlay (recovers automatically when monitors come and go)
+- DPI-aware UI (sharp at 100%, 125%, 150%, 200%)
+- Preset colours and a custom colour picker, with a recent-colours row
+- Opacity and density sliders with quick presets
+- System tray icon (state-aware: shows the active colour, dims when off)
+- Pause overlay for 10s / 30s / 1 min / 5 min via the tray
+- Settings profiles - save / load / export / import
+- Schedule (fixed times, including overnight, or sunset-to-sunrise via `astral`)
+- Optional global hotkeys (admin needed on Windows; opt-in)
+- Light / dark / follow-Windows theme
+- Portable mode (drop a `portable.ini` next to the exe)
+- Update banner that checks GitHub releases on startup
+- Atomic settings writes; corrupt files are backed up and reset
 
-**Advanced**
-- Single instance enforcement
-- Settings profiles with export/import functionality
-- Windows startup integration
-- Scheduled overlay (auto enable/disable)
-- Customisable hotkeys (requires `keyboard` library)
-- Dark mode support (adapts to Windows theme)
-- Portable mode (store settings in application directory)
-- Accessibility options (high contrast, font scaling)
-- Update checker
-- Window position persistence
-- Overlay monitoring with auto-recovery
-- Asynchronous logging
+## Install
 
-## System Requirements
+Grab the latest `EaseView.exe` from [the Releases page](https://github.com/Ropaxyz/EaseView/releases).
 
-- Windows 10 or Windows 11
-- Python 3.9+
+Or run from source:
 
-## Installation
-
-### Required Dependencies
 ```bash
-pip install pystray pillow
-```
-
-### Optional Dependencies
-```bash
-pip install pywin32 keyboard requests
-```
-
-| Package | Purpose |
-|---------|---------|
-| `pystray` | System tray integration |
-| `pillow` | Image processing for tray icon |
-| `pywin32` | Windows API (multi-monitor, startup, dark mode) |
-| `keyboard` | Global hotkey support |
-| `requests` | Update checking |
-
-> **Note:** `tkinter` is included with standard Python installations on Windows.
-
-## Usage
-```bash
+pip install -r requirements.txt
 python screen_overlay.py
 ```
 
-## Keyboard Shortcuts
+Optional packages and what they unlock:
+
+| Package | Why |
+|---|---|
+| `pywin32` | Better monitor info, Windows startup registry, dark mode |
+| `requests` | Update checks |
+| `keyboard` | Global system-wide hotkeys (needs admin) |
+| `astral` | Sunset / sunrise scheduling |
+
+`pystray` and `Pillow` are required (tray icon).
+
+## Usage
+
+```
+python screen_overlay.py
+python screen_overlay.py --minimized
+python screen_overlay.py --version
+```
+
+## Keyboard shortcuts (in-window)
 
 | Shortcut | Action |
-|----------|--------|
-| `Ctrl + Shift + O` | Toggle overlay on/off |
-| `Ctrl + Shift + ↑` | Increase overlay strength |
-| `Ctrl + Shift + ↓` | Decrease overlay strength |
-| `Ctrl + Shift + →` | Increase colour density |
-| `Ctrl + Shift + ←` | Decrease colour density |
-| `Escape` | Hide overlay (emergency) |
+|---|---|
+| `Ctrl+Shift+O` | Toggle overlay |
+| `Ctrl+Shift+↑ / ↓` | Strength up / down |
+| `Ctrl+Shift+→ / ←` | Density up / down |
+| `Esc` | Hide overlay |
+| `Tab` / `Enter` / `Space` | Navigate / activate |
 
-Custom hotkeys can be configured in **Settings → Hotkey Settings** (requires `keyboard` library).
+These work whenever the EaseView window is focused. **Global** hotkeys (active while EaseView is in the tray) are off by default - enable them in `Settings → Hotkey settings…`. The `keyboard` package needs admin on Windows.
 
-## Project Structure
+## Files
+
+User data lives in `%USERPROFILE%`, or alongside the exe in portable mode:
+
+| File | What it is |
+|---|---|
+| `.easeview_settings.json` | All saved settings |
+| `.easeview.log` | Rotating log |
+| `.easeview.lock` | PID lock (fallback) |
+| `.easeview_profiles/` | Saved profiles |
+
+If the settings file ever goes bad it's renamed to `.corrupt.<timestamp>.bak` and defaults are used.
+
+## Portable mode
+
+Put a file called `portable.ini` (or `portable.txt`) next to the exe. EaseView will then keep everything in its own folder.
+
+## Build
+
 ```
-EaseView/
-├── screen_overlay.py
-├── .easeview_settings.json
-├── .easeview.log
-└── .easeview_profiles/
+build_windows.bat
 ```
 
-## Building an Executable
-```bash
-pyinstaller --onefile --windowed screen_overlay.py
-```
+This installs requirements, runs the tests, and runs PyInstaller via `EaseView.spec`.
 
-Optional icon files:
-- `app_icon.ico`
-- `tray_icon.png`
+## Known issues
 
-## Settings Profiles
+- Windows only.
+- The `keyboard` package needs admin for global hotkeys.
+- Some exclusive-fullscreen DirectX games render on top of the overlay.
 
-EaseView supports saving and loading configuration profiles via the **File** menu:
+## Licence
 
-- **Save Current as Profile** – Save current settings as a named profile
-- **Load Profile** – Load a previously saved profile
-- **Manage Profiles** – View and delete saved profiles
+MIT - see [LICENSE](LICENSE).
 
-Profiles are stored in the `.easeview_profiles/` directory.
-
-## Portable Mode
-
-Create a file named `portable.ini` in the same directory as the executable. In portable mode, all settings and profiles are stored in the application directory instead of the user home directory.
-
-## Known Limitations
-
-- Windows only
-- Some fullscreen applications may override the overlay
-- Global hotkeys require administrator privileges (`keyboard` library limitation)
-- Multi-monitor support requires `pywin32` for optimal detection
-
-## License
-
-MIT License © 2026 Ross Paxton
-
-See [LICENSE](LICENSE) for full details.
-
-## Author
-
-**Ross Paxton**
-
-
+Ross Paxton - Ross.paxton@south-ayrshire.gov.uk
