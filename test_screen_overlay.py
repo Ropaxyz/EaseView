@@ -172,9 +172,75 @@ class TestSettingsManager(unittest.TestCase):
         self.assertFalse(m.save_profile(""))
         self.assertFalse(m.save_profile("../escape"))
 
+    def test_bad_nested_values_do_not_abort_load(self):
+        with open(self.path, "w") as fh:
+            json.dump({"opacity": 0.5,
+                       "schedule": {"location": {"latitude": "abc"}},
+                       "accessibility": {"font_scale": "big"}}, fh)
+        m = so.SettingsManager(settings_file=self.path)
+        self.assertAlmostEqual(m.get("opacity"), 0.5)
+        self.assertEqual(m.get("accessibility")["font_scale"], 1.0)
+        self.assertEqual(m.get("schedule")["location"]["latitude"], 55.9533)
+
+    def test_non_object_file_is_recovered(self):
+        with open(self.path, "w") as fh:
+            json.dump([1, 2, 3], fh)
+        m = so.SettingsManager(settings_file=self.path)
+        self.assertEqual(m.get("opacity"), 0.3)
+
+    def test_profile_stores_only_appearance(self):
+        m = so.SettingsManager(settings_file=self.path)
+        original = so.PROFILES_DIR
+        so.PROFILES_DIR = os.path.join(self.tmp, "profiles")
+        os.makedirs(so.PROFILES_DIR, exist_ok=True)
+        try:
+            m.set("opacity", 0.45)
+            m.set("custom_color", "#123456")
+            self.assertTrue(m.save_profile("Evening"))
+            m.set("opacity", 0.2)
+            m.set("auto_startup", True)
+            self.assertTrue(m.load_profile("Evening"))
+            self.assertAlmostEqual(m.get("opacity"), 0.45)
+            self.assertEqual(m.get("custom_color"), "#123456")
+            self.assertTrue(m.get("auto_startup"))  # machine setting untouched
+            self.assertEqual(m.get("current_profile"), "Evening")
+        finally:
+            so.PROFILES_DIR = original
+
+    def test_profile_names_cannot_escape_folder(self):
+        m = so.SettingsManager(settings_file=self.path)
+        self.assertFalse(m.load_profile("../settings"))
+        self.assertFalse(m.delete_profile("..\\settings"))
+
     def test_global_hotkeys_default_off(self):
         self.assertFalse(
             so.SettingsManager.DEFAULT_SETTINGS["enable_global_hotkeys"])
+
+
+class TestHotkeyRegistration(unittest.TestCase):
+
+    def test_register_all_reports_failures(self):
+        hm = so.HotkeyManager(callbacks={"a": lambda: None, "b": lambda: None})
+        with mock.patch.object(hm, "register", side_effect=[True, False]):
+            self.assertEqual(hm.register_all({"a": "ctrl+a", "b": "bad"}), ["b"])
+
+
+class TestSunsetSchedule(unittest.TestCase):
+
+    @unittest.skipUnless(so.ASTRAL_AVAILABLE, "astral not installed")
+    def test_sunset_times_are_local_not_utc(self):
+        from datetime import datetime, timezone
+        app = mock.Mock()
+        app.settings.get.return_value = {
+            "mode": "sunset",
+            "location": {"latitude": 55.46, "longitude": -4.63}}
+        sunset = datetime(2026, 6, 21, 21, 4, tzinfo=timezone.utc)
+        sunrise = datetime(2026, 6, 21, 3, 30, tzinfo=timezone.utc)
+        with mock.patch.object(so, "sun", return_value={"sunset": sunset,
+                                                        "sunrise": sunrise}):
+            start, end = so.ScheduleManager(app)._resolve_range()
+        self.assertEqual(start, sunset.astimezone().time())
+        self.assertEqual(end, sunrise.astimezone().time())
 
 
 class TestAsyncLogger(unittest.TestCase):
