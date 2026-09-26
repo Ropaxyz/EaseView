@@ -31,6 +31,13 @@ def _enable_dpi_awareness() -> None:
 
 _enable_dpi_awareness()
 
+
+def _win_dll(name: str) -> Any:
+    # ctypes.get_last_error() only sees errors from DLLs loaded with
+    # use_last_error=True; the shared ctypes.windll handles always read 0.
+    return ctypes.WinDLL(name, use_last_error=True)
+
+
 import atexit
 import argparse
 import json
@@ -109,6 +116,7 @@ SETTINGS_VERSION = 6
 LIGHT_COLOURS = {
     'accent':           '#0067C0',
     'accent_hover':     '#005A9E',
+    'accent_text':      '#FFFFFF',
     'background':       '#F5F5F5',
     'surface':          '#FFFFFF',
     'surface_hover':    '#F0F0F0',
@@ -129,6 +137,7 @@ LIGHT_COLOURS = {
 DARK_COLOURS = {
     'accent':           '#4CC2FF',
     'accent_hover':     '#62CDFF',
+    'accent_text':      '#000000',
     'background':       '#202020',
     'surface':          '#2D2D2D',
     'surface_hover':    '#383838',
@@ -144,6 +153,28 @@ DARK_COLOURS = {
     'inactive':         '#707070',
     'banner_bg':        '#4A3A00',
     'banner_fg':        '#FFE48A',
+}
+
+# Black / white / yellow, for users who need maximum contrast in the UI.
+HIGH_CONTRAST_COLOURS = {
+    'accent':           '#FFFF00',
+    'accent_hover':     '#FFFF66',
+    'accent_text':      '#000000',
+    'background':       '#000000',
+    'surface':          '#000000',
+    'surface_hover':    '#262626',
+    'surface_active':   '#333300',
+    'text_primary':     '#FFFFFF',
+    'text_secondary':   '#FFFFFF',
+    'border':           '#FFFFFF',
+    'border_active':    '#FFFF00',
+    'divider':          '#FFFFFF',
+    'focus':            '#00FFFF',
+    'success':          '#00FF00',
+    'warning':          '#FFFF00',
+    'inactive':         '#C0C0C0',
+    'banner_bg':        '#FFFF00',
+    'banner_fg':        '#000000',
 }
 
 BASE_FONTS = {
@@ -171,6 +202,23 @@ WINDOW = {
     'min_width':  380,
     'min_height': 540,
 }
+
+
+def _system_dpi_scale() -> float:
+    # 1.0 at 100% Windows scaling, 1.5 at 150%, etc.
+    if os.name != "nt":
+        return 1.0
+    try:
+        return max(1.0, ctypes.windll.user32.GetDpiForSystem() / 96.0)
+    except Exception:
+        return 1.0
+
+
+# Tk scales point-sized fonts itself, but padding and window sizes are raw
+# pixels, so scale them up to match or the UI looks cramped at 125%+.
+UI_SCALE = _system_dpi_scale()
+SPACING = {k: int(round(v * UI_SCALE)) for k, v in SPACING.items()}
+WINDOW = {k: int(round(v * UI_SCALE)) for k, v in WINDOW.items()}
 
 
 def _exe_dir() -> str:
@@ -313,11 +361,12 @@ class InstanceLocker:
             try:
                 ERROR_ALREADY_EXISTS = 183
                 name = "Local\\EaseView_SingleInstance_Mutex"
-                kernel32 = ctypes.windll.kernel32
+                kernel32 = _win_dll("kernel32")
                 kernel32.CreateMutexW.restype = ctypes.c_void_p
                 kernel32.CreateMutexW.argtypes = [ctypes.c_void_p,
                                                   ctypes.c_bool,
                                                   ctypes.c_wchar_p]
+                kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
                 handle = kernel32.CreateMutexW(None, True, name)
                 err = ctypes.get_last_error()
                 if handle and err != ERROR_ALREADY_EXISTS:
@@ -374,8 +423,11 @@ class InstanceLocker:
     def release_lock(cls) -> None:
         if cls._used_mutex and cls._mutex_handle:
             try:
-                ctypes.windll.kernel32.ReleaseMutex(cls._mutex_handle)
-                ctypes.windll.kernel32.CloseHandle(cls._mutex_handle)
+                kernel32 = _win_dll("kernel32")
+                kernel32.ReleaseMutex.argtypes = [ctypes.c_void_p]
+                kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+                kernel32.ReleaseMutex(cls._mutex_handle)
+                kernel32.CloseHandle(cls._mutex_handle)
             except Exception:
                 pass
             cls._mutex_handle = None
@@ -451,7 +503,11 @@ class MonitorDetector:
 
             MonitorEnumProc = ctypes.WINFUNCTYPE(
                 ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p,
-                ctypes.POINTER(RECT), ctypes.c_double)
+                ctypes.POINTER(RECT), ctypes.c_ssize_t)
+            user32.GetMonitorInfoW.argtypes = [ctypes.c_void_p,
+                                               ctypes.POINTER(MONITORINFO)]
+            user32.EnumDisplayMonitors.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
+                                                   MonitorEnumProc, ctypes.c_ssize_t]
             collected: List[Dict[str, int]] = []
 
             def cb(hmon, _hdc, _rect_ptr, _data):
@@ -729,11 +785,14 @@ class HotkeyManager:
         finally:
             self.registered.pop(name, None)
 
-    def register_all(self, hotkeys: Dict[str, str]) -> None:
+    def register_all(self, hotkeys: Dict[str, str]) -> List[str]:
+        """Register every known hotkey; returns the names that failed."""
+        failed = []
         for name, hk in hotkeys.items():
             cb = self.callbacks.get(name)
-            if cb is not None:
-                self.register(name, hk, cb)
+            if cb is not None and not self.register(name, hk, cb):
+                failed.append(name)
+        return failed
 
     def stop(self) -> None:
         for name in list(self.registered):
@@ -818,7 +877,11 @@ class SettingsManager:
                 return
             with open(self.settings_file, 'r', encoding='utf-8') as fh:
                 loaded = json.load(fh)
+            if not isinstance(loaded, dict):
+                raise json.JSONDecodeError("top level is not an object", "", 0)
             file_version = loaded.get('version', 1)
+            if not isinstance(file_version, int):
+                file_version = 1
             if file_version < SETTINGS_VERSION:
                 loaded = self._migrate(loaded, file_version)
             self._validate_and_apply(loaded)
@@ -914,20 +977,28 @@ class SettingsManager:
                     self.settings['schedule'][k] = v
             loc = sch.get('location') or {}
             if isinstance(loc, dict):
-                self.settings['schedule']['location'].update({
-                    'latitude': float(loc.get('latitude', 55.9533)),
-                    'longitude': float(loc.get('longitude', -3.1883)),
-                    'timezone': str(loc.get('timezone', 'Europe/London')),
-                })
+                cur = self.settings['schedule']['location']
+                try:
+                    lat = float(loc.get('latitude', cur['latitude']))
+                    lon = float(loc.get('longitude', cur['longitude']))
+                    if -90 <= lat <= 90 and -180 <= lon <= 180:
+                        cur['latitude'], cur['longitude'] = lat, lon
+                except (TypeError, ValueError):
+                    pass
+                if isinstance(loc.get('timezone'), str):
+                    cur['timezone'] = loc['timezone']
             if self.settings['schedule']['mode'] not in ('fixed', 'sunset'):
                 self.settings['schedule']['mode'] = 'fixed'
 
         acc = loaded.get('accessibility') or {}
         if isinstance(acc, dict):
+            try:
+                font_scale = max(0.8, min(2.0, float(acc.get('font_scale', 1.0))))
+            except (TypeError, ValueError):
+                font_scale = 1.0
             self.settings['accessibility'] = {
                 'high_contrast': bool(acc.get('high_contrast', False)),
-                'font_scale': max(0.8, min(2.0,
-                                           float(acc.get('font_scale', 1.0))))
+                'font_scale': font_scale,
             }
 
     def _backup_and_reset(self) -> None:
@@ -991,12 +1062,23 @@ class SettingsManager:
             logger.error(f"Import settings failed: {exc}")
             return False
 
+    # A profile is a "look" (e.g. Reading, Evening). Startup, hotkeys,
+    # schedule and window position are machine settings and stay put.
+    PROFILE_KEYS = ('preset_name', 'custom_color', 'opacity', 'density')
+
+    @staticmethod
+    def valid_profile_name(name: str) -> bool:
+        return bool(name) and bool(re.match(r'^[\w\- ]+$', name)) \
+            and name.strip() == name and len(name) <= 64
+
     def save_profile(self, name: str, data: Optional[Dict[str, Any]] = None) -> bool:
-        if not name or not re.match(r'^[\w\- ]+$', name):
+        if not self.valid_profile_name(name):
             logger.error(f"Refusing invalid profile name: {name!r}")
             return False
         try:
-            payload = data if data is not None else self.settings
+            source = data if data is not None else self.settings
+            payload = {k: source.get(k) for k in self.PROFILE_KEYS}
+            payload['version'] = SETTINGS_VERSION
             path = os.path.join(PROFILES_DIR, f"{name}.json")
             with open(path, 'w', encoding='utf-8') as fh:
                 json.dump(payload, fh, indent=2)
@@ -1006,14 +1088,24 @@ class SettingsManager:
             return False
 
     def load_profile(self, name: str) -> bool:
+        if not self.valid_profile_name(name):
+            return False
         try:
             path = os.path.join(PROFILES_DIR, f"{name}.json")
             if not os.path.exists(path):
                 return False
             with open(path, 'r', encoding='utf-8') as fh:
                 loaded = json.load(fh)
-            self._validate_and_apply(loaded)
-            self.set('current_profile', name, save_immediately=False)
+            if not isinstance(loaded, dict):
+                return False
+            # Validate through a scratch manager so only the look is copied
+            # across; older full-settings profiles load the same way.
+            scratch = SettingsManager.__new__(SettingsManager)
+            scratch._validate_and_apply(loaded)
+            with self._lock:
+                for k in self.PROFILE_KEYS:
+                    self.settings[k] = scratch.settings[k]
+                self.settings['current_profile'] = name
             self.save()
             return True
         except Exception as exc:
@@ -1032,6 +1124,8 @@ class SettingsManager:
             return []
 
     def delete_profile(self, name: str) -> bool:
+        if not self.valid_profile_name(name):
+            return False
         try:
             path = os.path.join(PROFILES_DIR, f"{name}.json")
             if os.path.exists(path):
@@ -1066,6 +1160,10 @@ class OverlayManager:
         self._last_monitor_signature: Optional[Tuple] = None
         self._fade_after_id: Optional[str] = None
         self._lock = threading.RLock()
+        # How the monitor-watch thread hands work to the Tk thread. The app
+        # swaps in its own queue-based dispatcher.
+        self.dispatch: Callable[[Callable[[], None]], None] = \
+            lambda fn: self.root.after(0, fn)
 
     @staticmethod
     def _signature(monitors: List[Dict[str, int]]) -> Tuple:
@@ -1151,7 +1249,7 @@ class OverlayManager:
     def _make_click_through(self, win: tk.Toplevel) -> bool:
         try:
             hwnd = win.winfo_id()
-            user32 = ctypes.windll.user32
+            user32 = _win_dll("user32")
             user32.GetParent.argtypes = [ctypes.c_void_p]
             user32.GetParent.restype = ctypes.c_void_p
             user32.GetWindowLongPtrW.argtypes = [ctypes.c_void_p, ctypes.c_int]
@@ -1164,16 +1262,35 @@ class OverlayManager:
             style = user32.GetWindowLongPtrW(target, self.GWL_EXSTYLE)
             new = style | self.WS_EX_LAYERED | self.WS_EX_TRANSPARENT \
                        | self.WS_EX_TOOLWINDOW | self.WS_EX_NOACTIVATE
-            ctypes.windll.kernel32.SetLastError(0)
-            user32.SetWindowLongPtrW(target, self.GWL_EXSTYLE, new)
-            err = ctypes.windll.kernel32.GetLastError()
-            if err not in (0,):
+            ctypes.set_last_error(0)
+            prev = user32.SetWindowLongPtrW(target, self.GWL_EXSTYLE, new)
+            # A zero return only means failure if an error code was set too.
+            err = ctypes.get_last_error()
+            if prev == 0 and err != 0:
                 logger.error(f"SetWindowLongPtrW error {err}")
                 return False
             return True
         except Exception as exc:
             logger.error(f"Click-through setup failed: {exc}")
             return False
+
+    def recolour(self, color: str, opacity: float, density: float) -> bool:
+        """Change colour in place (no flicker). False if there's nothing to change."""
+        with self._lock:
+            if not self.overlay_windows:
+                return False
+            self.current_color = color
+            self.current_opacity = opacity
+            self.current_density = density
+            adjusted = self._apply_density(color, density)
+            for w in self.overlay_windows:
+                try:
+                    w.configure(bg=adjusted)
+                    if self.is_active:
+                        w.attributes('-alpha', opacity)
+                except Exception:
+                    return False
+            return True
 
     def update_opacity(self, opacity: float) -> None:
         with self._lock:
@@ -1293,9 +1410,9 @@ class OverlayManager:
                     if sig != self._last_monitor_signature and self.is_active and self.current_color:
                         self._last_monitor_signature = sig
                         logger.info("Monitor layout changed, rebuilding overlays")
-                        self.root.after(0, self._rebuild_for_current)
+                        self.dispatch(self._rebuild_for_current)
                     if self.is_active and self.overlay_windows:
-                        self.root.after(0, self._reassert_topmost)
+                        self.dispatch(self._reassert_topmost)
                 except Exception as exc:
                     logger.warning(f"Monitor loop: {exc}")
                 for _ in range(20):
@@ -1369,7 +1486,10 @@ class ScheduleManager:
                                     loc.get('latitude', 0.0),
                                     loc.get('longitude', 0.0))
                 today = sun(info.observer, date=datetime.now().date())
-                return today['sunset'].time(), today['sunrise'].time()
+                # astral returns UTC; convert to the PC's local clock (BST
+                # in summer) so it matches datetime.now() below.
+                return (today['sunset'].astimezone().time(),
+                        today['sunrise'].astimezone().time())
             except Exception as exc:
                 logger.warning(f"Astral sunset calc failed: {exc}")
                 return None
@@ -1386,16 +1506,19 @@ class ScheduleManager:
         self._running = True
 
         def loop() -> None:
+            # Act only when we cross a boundary, so a manual toggle inside
+            # the window isn't undone 30 seconds later.
+            last_in_range: Optional[bool] = None
             while self._running:
                 try:
                     rng = self._resolve_range()
                     if rng:
                         start, end = rng
                         in_range = self._in_range(datetime.now().time(), start, end)
-                        if in_range and not self.app.overlay.is_active and self.app.current_color():
-                            self.app.root.after(0, self.app.overlay.show)
-                        elif not in_range and self.app.overlay.is_active:
-                            self.app.root.after(0, self.app.overlay.hide)
+                        if in_range != last_in_range:
+                            last_in_range = in_range
+                            self.app.call_in_main(
+                                lambda on=in_range: self.app.apply_schedule_state(on))
                 except Exception as exc:
                     logger.error(f"Schedule loop error: {exc}")
                 # 30s tick, but check stop flag often
@@ -1454,6 +1577,11 @@ class TrayManager:
             logger.warning(f"Tray icon image build failed: {exc}")
             return None
 
+    def _action(self, fn: Callable[[], None]) -> Callable[[Any, Any], None]:
+        # pystray calls menu actions on its own thread; Tk must only be
+        # touched from the main thread.
+        return lambda _icon, _item: self.app.call_in_main(fn)
+
     def _build_menu(self) -> Any:
         items: List[Any] = []
 
@@ -1462,14 +1590,13 @@ class TrayManager:
 
         items.append(pystray.MenuItem(
             "Show / Hide overlay",
-            lambda icon, _it: self.app.toggle_overlay(),
+            self._action(self.app.toggle_overlay),
             default=True))
 
         pause_items = [
-            pystray.MenuItem("10 seconds", lambda icon, _it: self.app.pause_overlay(10)),
-            pystray.MenuItem("30 seconds", lambda icon, _it: self.app.pause_overlay(30)),
-            pystray.MenuItem("1 minute",   lambda icon, _it: self.app.pause_overlay(60)),
-            pystray.MenuItem("5 minutes",  lambda icon, _it: self.app.pause_overlay(300)),
+            pystray.MenuItem(label, self._action(lambda s=secs: self.app.pause_overlay(s)))
+            for label, secs in (("10 seconds", 10), ("30 seconds", 30),
+                                ("1 minute", 60), ("5 minutes", 300))
         ]
         items.append(pystray.MenuItem(
             "Pause overlay", pystray.Menu(*pause_items),
@@ -1480,8 +1607,8 @@ class TrayManager:
             for name, data in self.app.PRESETS.items():
                 colour_items.append(pystray.MenuItem(
                     name,
-                    lambda icon, _it, n=name, c=data['color']:
-                        self.app.select_preset(n, c),
+                    self._action(lambda n=name, c=data['color']:
+                                 self.app.select_preset(n, c)),
                     checked=lambda _it, n=name: self.app.active_preset == n,
                     radio=True))
             items.append(pystray.MenuItem("Quick colour",
@@ -1494,7 +1621,11 @@ class TrayManager:
             if profiles:
                 pitems = [
                     pystray.MenuItem(
-                        p, lambda icon, _it, name=p: self.app.load_profile_by_name(name))
+                        p, self._action(lambda name=p:
+                                        self.app.load_profile_by_name(name, quiet=True)),
+                        checked=lambda _it, name=p:
+                            self.app.settings.get('current_profile') == name,
+                        radio=True)
                     for p in profiles
                 ]
                 items.append(pystray.MenuItem("Profiles", pystray.Menu(*pitems)))
@@ -1502,13 +1633,14 @@ class TrayManager:
             pass
 
         items.append(pystray.Menu.SEPARATOR)
-        items.append(pystray.MenuItem("Open settings...",
-                                       lambda icon, _it: self.app.show_window()))
-        items.append(pystray.MenuItem("Check for updates...",
-                                       lambda icon, _it: self.app.check_updates_async(manual=True)))
+        items.append(pystray.MenuItem("Open EaseView...",
+                                       self._action(self.app.show_window)))
+        items.append(pystray.MenuItem(
+            "Check for updates...",
+            self._action(lambda: self.app.check_updates_async(manual=True))))
         items.append(pystray.Menu.SEPARATOR)
         items.append(pystray.MenuItem("Exit EaseView",
-                                       lambda icon, _it: self.app.quit_app()))
+                                       self._action(self.app.quit_app)))
         return pystray.Menu(*items)
 
     def _state_line(self) -> str:
@@ -1562,6 +1694,14 @@ class TrayManager:
                 f" - {label}" if label else "")
         except Exception as exc:
             logger.warning(f"Failed to update tray icon colour: {exc}")
+
+    def notify(self, message: str) -> None:
+        if self.icon is None or not getattr(self.icon, 'HAS_NOTIFICATION', False):
+            return
+        try:
+            self.icon.notify(message, "EaseView")
+        except Exception as exc:
+            logger.warning(f"Tray notification failed: {exc}")
 
     def rebuild_menu(self) -> None:
         if not self.available or self.icon is None:
@@ -1816,8 +1956,10 @@ class UpdateBanner(tk.Frame):
                               bg=colours['banner_bg'], fg=colours['banner_fg'])
         self.label.pack(side=tk.LEFT, padx=12, pady=8, fill=tk.X, expand=True)
         btn_open = tk.Button(self, text="Download", relief=tk.FLAT,
-                             bg=colours['accent'], fg='white', cursor='hand2',
-                             command=self._open)
+                             bg=colours['accent'], fg=colours['accent_text'],
+                             activebackground=colours['accent_hover'],
+                             activeforeground=colours['accent_text'],
+                             cursor='hand2', command=self._open)
         btn_open.pack(side=tk.RIGHT, padx=(4, 8), pady=6)
         btn_skip = tk.Button(self, text="Skip", relief=tk.FLAT,
                              bg=colours['banner_bg'], fg=colours['banner_fg'],
@@ -1885,13 +2027,22 @@ class EaseViewApp:
         self.root = tk.Tk()
         self.root.title("EaseView")
         try:
-            self.root.tk.call('tk', 'scaling',
-                              self.settings.get('accessibility', {}).get('font_scale', 1.0)
-                              * self._auto_tk_scaling())
+            # Tk scaling is pixels per point (96 DPI = 1.333). Font scale is
+            # already applied in _resolve_fonts, so don't apply it twice.
+            self.root.tk.call('tk', 'scaling', UI_SCALE * 96.0 / 72.0)
         except Exception:
             pass
 
+        # Background threads (tray, schedule, hotkeys, updates, monitor
+        # watch) queue work here; the Tk thread drains it.
+        self._ui_queue: "queue.Queue[Callable[[], None]]" = queue.Queue()
+        self._pause_after_id: Optional[str] = None
+        self._tray_hint_shown = False
+        self._pending_update: Optional[Tuple[str, str]] = None
+        self.root.after(50, self._drain_ui_queue)
+
         self.overlay = OverlayManager(self.root)
+        self.overlay.dispatch = self.call_in_main
         self.overlay.enable_fade = self.settings.get('enable_fade', True)
         self.tray = TrayManager(self)
         self.schedule_manager = ScheduleManager(self)
@@ -1903,7 +2054,7 @@ class EaseViewApp:
                 'increase_density': lambda: self.adjust_density(10),
                 'decrease_density': lambda: self.adjust_density(-10),
             },
-            dispatch=self._dispatch_to_main,
+            dispatch=self.call_in_main,
         )
 
         self.colour_buttons: Dict[str, AccessibleButton] = {}
@@ -1914,6 +2065,7 @@ class EaseViewApp:
         self.custom_color: Optional[str] = self.settings.get('custom_color')
 
         self._set_window_icon()
+        self._apply_dialog_theme()
         self._build_window()
         self._build_menu()
         self._bind_shortcuts()
@@ -1924,6 +2076,7 @@ class EaseViewApp:
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_window_close)
         self.root.bind("<Map>", self._on_window_map)
+        self.root.bind("<Unmap>", self._on_window_unmap)
 
         self._restore_window_geometry()
         self._setup_hotkeys_from_settings()
@@ -1943,12 +2096,16 @@ class EaseViewApp:
         start_min = (self.cli_args.minimized
                      or self.settings.get('start_minimized', False))
         if start_min:
-            self.root.after(50, self.root.withdraw)
+            # No tray icon means no way back from withdraw(), so minimise.
+            self.root.after(50, self.root.withdraw if self.tray.icon is not None
+                            else self.root.iconify)
 
         logger.info(f"EaseView v{VERSION} started "
                     f"(portable={PORTABLE_MODE}, dark={WindowsIntegration.is_dark_mode()})")
 
     def _resolve_palette(self) -> Dict[str, str]:
+        if self.settings.get('accessibility', {}).get('high_contrast', False):
+            return HIGH_CONTRAST_COLOURS.copy()
         theme = self.settings.get('theme', 'system')
         if theme == 'dark':
             return DARK_COLOURS.copy()
@@ -1965,16 +2122,6 @@ class EaseViewApp:
         return scaled
 
     @staticmethod
-    def _auto_tk_scaling() -> float:
-        if os.name != "nt":
-            return 1.0
-        try:
-            dpi = ctypes.windll.user32.GetDpiForSystem()
-            return max(1.0, dpi / 96.0)
-        except Exception:
-            return 1.0
-
-    @staticmethod
     def _resource_path(rel: str) -> str:
         base = getattr(sys, '_MEIPASS', _exe_dir())
         return os.path.join(base, rel)
@@ -1983,9 +2130,103 @@ class EaseViewApp:
         try:
             ico = self._resource_path('app_icon.ico')
             if os.path.exists(ico):
-                self.root.iconbitmap(ico)
+                # default= also covers dialogs, which otherwise get the Tk feather.
+                self.root.iconbitmap(default=ico)
         except Exception as exc:
             logger.warning(f"Could not set window icon: {exc}")
+
+    def call_in_main(self, fn: Callable[[], None]) -> None:
+        """Thread-safe: run fn on the Tk thread."""
+        self._ui_queue.put(fn)
+
+    def _drain_ui_queue(self) -> None:
+        while True:
+            try:
+                fn = self._ui_queue.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                fn()
+            except Exception as exc:
+                logger.error(f"UI task failed: {exc}\n{traceback.format_exc()}")
+        try:
+            self.root.after(50, self._drain_ui_queue)
+        except Exception:
+            pass
+
+    def _apply_dialog_theme(self) -> None:
+        # Dialogs are created with class_='EaseDialog' so these option-database
+        # entries theme them without touching every widget by hand.
+        c = self.colours
+        for opt, val in (
+            ('Background', c['background']),
+            ('Foreground', c['text_primary']),
+            ('activeBackground', c['surface_hover']),
+            ('activeForeground', c['text_primary']),
+            ('disabledForeground', c['inactive']),
+            ('highlightBackground', c['background']),
+            ('highlightColor', c['focus']),
+            ('selectColor', c['surface']),
+            ('selectBackground', c['accent']),
+            ('selectForeground', c['accent_text']),
+            ('insertBackground', c['text_primary']),
+            ('troughColor', c['surface']),
+            ('Entry.Background', c['surface']),
+            ('Listbox.Background', c['surface']),
+            ('Button.Background', c['surface']),
+        ):
+            self.root.option_add(f'*EaseDialog*{opt}', val)
+        # Fonts in dialogs follow the font-scale setting too.
+        self.root.option_add('*EaseDialog*Font', self.fonts['body'])
+
+    def _make_dialog(self, title: str) -> tk.Toplevel:
+        dlg = tk.Toplevel(self.root, class_='EaseDialog')
+        dlg.withdraw()
+        dlg.title(title)
+        dlg.configure(bg=self.colours['background'])
+        dlg.transient(self.root)
+        dlg.bind('<Escape>', lambda _e: dlg.destroy())
+        return dlg
+
+    def _show_dialog(self, dlg: tk.Toplevel, min_width: int = 0,
+                     min_height: int = 0) -> None:
+        # Size to content (so larger fonts never clip), centred on the app.
+        try:
+            dlg.update_idletasks()
+            w = max(dlg.winfo_reqwidth(), int(min_width * UI_SCALE))
+            h = max(dlg.winfo_reqheight(), int(min_height * UI_SCALE))
+            if self.root.winfo_viewable():
+                cx = self.root.winfo_rootx() + self.root.winfo_width() // 2
+                cy = self.root.winfo_rooty() + self.root.winfo_height() // 2
+            else:
+                m = MonitorDetector.primary()
+                cx = m['work_x'] + m['work_width'] // 2
+                cy = m['work_y'] + m['work_height'] // 2
+            dlg.geometry(f"{w}x{h}+{max(0, cx - w // 2)}+{max(0, cy - h // 2)}")
+            dlg.minsize(w, h)
+            dlg.deiconify()
+            dlg.lift()
+            dlg.focus_set()
+            dlg.grab_set()
+        except tk.TclError as exc:
+            logger.warning(f"Dialog show: {exc}")
+
+    def _rebuild_ui(self) -> None:
+        """Rebuild the main window so theme / font changes apply instantly."""
+        self.colours = self._resolve_palette()
+        self.fonts = self._resolve_fonts()
+        self._apply_dialog_theme()
+        for child in list(self.root.winfo_children()):
+            # Toplevels are the overlay windows and any open dialog.
+            if not isinstance(child, tk.Toplevel):
+                child.destroy()
+        self.colour_buttons = {}
+        self._build_window()
+        self._build_menu()
+        self._update_selection_ui()
+        if self._pending_update and self.update_banner is not None:
+            self.update_banner.show_for(*self._pending_update, VERSION)
+            self.update_banner.pack(fill=tk.X)
 
     def current_color(self) -> Optional[str]:
         if self.active_preset:
@@ -2056,7 +2297,7 @@ class EaseViewApp:
 
     def _on_theme_change(self) -> None:
         self.settings.set('theme', self._theme_var.get())
-        messagebox.showinfo("Theme", "Theme will fully apply after restart.")
+        self._rebuild_ui()
 
     def _build_window(self) -> None:
         c = self.colours
@@ -2107,7 +2348,13 @@ class EaseViewApp:
         canvas.bind('<Configure>', _on_canvas_configure)
 
         def _on_mousewheel(e):
+            # bind_all sees wheel events from every window; only scroll when
+            # the pointer is over the main window, not a dialog.
             try:
+                if e.widget.winfo_toplevel() is not self.root:
+                    return
+                if canvas.yview() == (0.0, 1.0):
+                    return  # everything fits, nothing to scroll
                 canvas.yview_scroll(int(-1 * (e.delta / 120)), 'units')
             except Exception:
                 pass
@@ -2146,22 +2393,12 @@ class EaseViewApp:
             colours_box, c, f, command=self.choose_custom_color,
             is_active=custom_active, color=self.custom_color)
         self.custom_button.pack(fill=tk.X, pady=(0, SPACING['row_gap']))
-        Tooltip(self.custom_button,
-                "Pick any colour" +
-                (f"   (current: {self.custom_color.upper()})"
-                 if self.custom_color else ""))
+        self._custom_tip = Tooltip(self.custom_button, "")
+        self._update_custom_tooltip()
 
-        recents = self.settings.get('recent_colors', []) or []
-        if recents:
-            rec_frame = tk.Frame(inner, bg=c['background'])
-            rec_frame.pack(fill=tk.X, pady=(8, 0))
-            tk.Label(rec_frame, text="Recent:", font=f['footer'],
-                     bg=c['background'], fg=c['text_secondary']).pack(side=tk.LEFT)
-            for hexc in recents[:8]:
-                sw = tk.Label(rec_frame, text='   ', bg=hexc, bd=1, relief='solid',
-                              cursor='hand2')
-                sw.pack(side=tk.LEFT, padx=3)
-                sw.bind('<Button-1>', lambda _e, col=hexc: self._apply_recent_color(col))
+        self._recent_frame = tk.Frame(inner, bg=c['background'])
+        self._recent_frame.pack(fill=tk.X)
+        self._refresh_recent_row()
 
         self._build_slider_section(
             inner, "Overlay strength", "opacity_var", "opacity_value_label",
@@ -2188,18 +2425,70 @@ class EaseViewApp:
         fi.pack(fill=tk.X, padx=SPACING['window_padding'], pady=8)
 
         monitors_count = len(MonitorDetector.get_monitors())
-        modes = []
-        if WIN32_AVAILABLE:    modes.append("win32")
-        if KEYBOARD_AVAILABLE: modes.append("hotkeys")
-        if REQUESTS_AVAILABLE: modes.append("updates")
-        if ASTRAL_AVAILABLE:   modes.append("astral")
-        if PORTABLE_MODE:      modes.append("portable")
         status = f"v{VERSION}   |   {monitors_count} monitor{'s' if monitors_count != 1 else ''}"
-        if modes:
-            status += "   |   " + ", ".join(modes)
+        if PORTABLE_MODE:
+            status += "   |   portable"
         tk.Label(fi, text=status, font=f['footer'],
                  bg=c['surface'], fg=c['text_secondary'],
                  anchor='w').pack(side=tk.LEFT)
+
+    def _update_custom_tooltip(self) -> None:
+        tip = getattr(self, '_custom_tip', None)
+        if tip is not None:
+            tip.text = "Pick any colour" + (
+                f"   (current: {self.custom_color.upper()})" if self.custom_color else "")
+
+    def _refresh_recent_row(self) -> None:
+        frame = getattr(self, '_recent_frame', None)
+        if frame is None:
+            return
+        c, f = self.colours, self.fonts
+        for w in frame.winfo_children():
+            w.destroy()
+        recents = self.settings.get('recent_colors', []) or []
+        if not recents:
+            frame.configure(height=1)
+            return
+        row = tk.Frame(frame, bg=c['background'])
+        row.pack(fill=tk.X, pady=(8, 0))
+        tk.Label(row, text="Recent:", font=f['footer'],
+                 bg=c['background'], fg=c['text_secondary']).pack(side=tk.LEFT)
+        for hexc in recents[:8]:
+            sw = tk.Label(row, text='   ', bg=hexc, bd=1, relief='solid',
+                          cursor='hand2', takefocus=True,
+                          highlightthickness=2, highlightcolor=c['focus'],
+                          highlightbackground=c['background'])
+            sw.pack(side=tk.LEFT, padx=3)
+            sw.bind('<Button-1>', lambda _e, col=hexc: self._apply_recent_color(col))
+            sw.bind('<Return>', lambda _e, col=hexc: self._apply_recent_color(col))
+            sw.bind('<space>', lambda _e, col=hexc: self._apply_recent_color(col))
+            Tooltip(sw, hexc.upper())
+
+    def _refresh_from_settings(self) -> None:
+        """Sync the window with settings after a profile load / import."""
+        self.active_preset = self.settings.get('preset_name')
+        self.custom_color = self.settings.get('custom_color')
+        self._update_selection_ui()
+        self._refresh_recent_row()
+        opacity = self.settings.get('opacity', 0.3) * 100
+        density = self.settings.get('density', 1.0) * 100
+        if hasattr(self, 'opacity_var'):
+            self.opacity_var.set(opacity)
+            self.opacity_value_label.configure(text=f"{int(round(opacity))}%")
+        if hasattr(self, 'density_var'):
+            self.density_var.set(density)
+            self.density_value_label.configure(text=f"{int(round(density))}%")
+        self.overlay.update_opacity(self.settings.get('opacity', 0.3))
+        self.overlay.update_density(self.settings.get('density', 1.0))
+
+    def _reapply_runtime_settings(self) -> None:
+        """Re-arm hotkeys, schedule and fade after settings change wholesale."""
+        self.overlay.enable_fade = self.settings.get('enable_fade', True)
+        self.hotkey_manager.stop()
+        self._setup_hotkeys_from_settings()
+        self.schedule_manager.stop()
+        if self.settings.get('schedule', {}).get('enabled', False):
+            self.schedule_manager.start()
 
     def _build_slider_section(self, parent: tk.Widget, title: str,
                               var_attr: str, label_attr: str, initial: float,
@@ -2289,6 +2578,8 @@ class EaseViewApp:
         if not event or event.widget is not self.root:
             return
         try:
+            if self.root.state() != 'normal':
+                return  # don't remember maximised / minimised (-32000) positions
             geom = self.root.geometry()
             m = re.match(r"(\d+)x(\d+)\+(-?\d+)\+(-?\d+)", geom)
             if not m:
@@ -2306,41 +2597,52 @@ class EaseViewApp:
         except Exception:
             pass
 
-    def _bind_shortcuts(self) -> None:
-        self.root.bind_all("<Control-Shift-o>", lambda _e: self.toggle_overlay())
-        self.root.bind_all("<Control-Shift-O>", lambda _e: self.toggle_overlay())
-        self.root.bind_all("<Escape>", lambda _e: self.hide_overlay())
-        self.root.bind_all("<Control-Shift-Up>",    lambda _e: self.adjust_opacity(5))
-        self.root.bind_all("<Control-Shift-Down>",  lambda _e: self.adjust_opacity(-5))
-        self.root.bind_all("<Control-Shift-Right>", lambda _e: self.adjust_density(10))
-        self.root.bind_all("<Control-Shift-Left>",  lambda _e: self.adjust_density(-10))
+    # In-window shortcut -> (hotkey name, same combo in 'keyboard' format)
+    _WINDOW_SHORTCUTS = (
+        ("<Control-Shift-o>",     'toggle',           'ctrl+shift+o'),
+        ("<Control-Shift-O>",     'toggle',           'ctrl+shift+o'),
+        ("<Control-Shift-Up>",    'increase_opacity', 'ctrl+shift+up'),
+        ("<Control-Shift-Down>",  'decrease_opacity', 'ctrl+shift+down'),
+        ("<Control-Shift-Right>", 'increase_density', 'ctrl+shift+right'),
+        ("<Control-Shift-Left>",  'decrease_density', 'ctrl+shift+left'),
+    )
 
-    def _setup_hotkeys_from_settings(self) -> None:
+    def _bind_shortcuts(self) -> None:
+        # Bound on the root (not bind_all) so they only fire in the main
+        # window; in dialogs Esc closes the dialog instead of the overlay.
+        for seq, name, combo in self._WINDOW_SHORTCUTS:
+            self.root.bind(seq, lambda _e, n=name, k=combo: self._on_window_shortcut(n, k))
+        self.root.bind("<Escape>", lambda _e: self.hide_overlay())
+
+    def _on_window_shortcut(self, name: str, combo: str) -> None:
+        # If the same combo is registered globally, the keyboard hook has
+        # already fired it - running it again would undo a toggle.
+        if self.hotkey_manager.registered.get(name) == combo:
+            return
+        cb = self.hotkey_manager.callbacks.get(name)
+        if cb is not None:
+            cb()
+
+    def _setup_hotkeys_from_settings(self) -> List[str]:
+        """Register global hotkeys if enabled; returns names that failed."""
         # In-window shortcuts are always live via _bind_shortcuts(). Global
         # system-wide hotkeys are opt-in.
         if not self.settings.get('enable_global_hotkeys', False):
             logger.info("Global hotkeys disabled (opt in via Settings -> Hotkeys)")
-            return
+            return []
         if not KEYBOARD_AVAILABLE:
             logger.info("Global hotkeys requested but 'keyboard' is unavailable")
-            return
+            return []
         hk = self.settings.get('hotkeys', {}) or {}
         if not hk:
-            return
-        self.hotkey_manager.register_all(hk)
-
-    def _dispatch_to_main(self, fn: Callable[[], None]) -> None:
-        # Used by HotkeyManager so callbacks always run on the Tk thread.
-        try:
-            self.root.after(0, fn)
-        except Exception as exc:
-            logger.error(f"Main-thread dispatch failed: {exc}")
+            return []
+        return self.hotkey_manager.register_all(hk)
 
     def on_opacity_change(self, value: Any) -> None:
         opacity = max(0.1, min(0.6, float(value) / 100))
         self.settings.set('opacity', opacity, save_immediately=False)
         if hasattr(self, 'opacity_value_label'):
-            self.opacity_value_label.configure(text=f"{int(float(value))}%")
+            self.opacity_value_label.configure(text=f"{int(round(float(value)))}%")
         self.overlay.update_opacity(opacity)
         if hasattr(self, '_op_timer'):
             try: self.root.after_cancel(self._op_timer)
@@ -2351,7 +2653,7 @@ class EaseViewApp:
         density = max(0.5, min(1.5, float(value) / 100))
         self.settings.set('density', density, save_immediately=False)
         if hasattr(self, 'density_value_label'):
-            self.density_value_label.configure(text=f"{int(float(value))}%")
+            self.density_value_label.configure(text=f"{int(round(float(value)))}%")
         self.overlay.update_density(density)
         if hasattr(self, '_de_timer'):
             try: self.root.after_cancel(self._de_timer)
@@ -2424,15 +2726,26 @@ class EaseViewApp:
                               save_immediately=False)
         self.settings.save_pending()
         self._update_selection_ui()
+        self._update_custom_tooltip()
+        if record:
+            self._refresh_recent_row()
         self.apply_overlay(hexc)
 
     def apply_overlay(self, color: str) -> None:
         if not color:
             return
+        self._cancel_pause()
         opacity = float(self.settings.get('opacity', 0.3))
         density = float(self.settings.get('density', 1.0))
         self.overlay.enable_fade = self.settings.get('enable_fade', True)
-        ok = self.overlay.create(color, opacity, density)
+        # Recolour existing windows in place where possible - rebuilding
+        # them makes the whole screen flash on every colour click.
+        if self.overlay.recolour(color, opacity, density):
+            if not self.overlay.is_active:
+                self.overlay.show()
+            ok = True
+        else:
+            ok = self.overlay.create(color, opacity, density)
         if not ok:
             messagebox.showerror(
                 "EaseView",
@@ -2451,6 +2764,7 @@ class EaseViewApp:
         if self.overlay.is_active:
             self.hide_overlay()
             return
+        self._cancel_pause()
         color = self.current_color()
         if not color:
             messagebox.showinfo(
@@ -2470,6 +2784,7 @@ class EaseViewApp:
         self.apply_overlay(color)
 
     def hide_overlay(self) -> None:
+        self._cancel_pause()
         self.overlay.hide()
         self.settings.set('overlay_enabled', False, save_immediately=False)
         self.settings.save_pending()
@@ -2484,11 +2799,7 @@ class EaseViewApp:
             messagebox.showinfo("EaseView",
                                 "The overlay is not active, nothing to pause.")
             return
-        if getattr(self, '_pause_after_id', None):
-            try:
-                self.root.after_cancel(self._pause_after_id)
-            except Exception:
-                pass
+        self._cancel_pause()
         self.overlay.hide(use_fade=False)
         if self.toggle_button:
             self.toggle_button.set_state(False)
@@ -2498,20 +2809,34 @@ class EaseViewApp:
         self._pause_after_id = self.root.after(
             int(seconds * 1000), self._resume_after_pause)
 
+    def _cancel_pause(self) -> None:
+        if self._pause_after_id:
+            try:
+                self.root.after_cancel(self._pause_after_id)
+            except Exception:
+                pass
+            self._pause_after_id = None
+
     def _resume_after_pause(self) -> None:
+        # Any manual toggle during the pause cancels this timer, so reaching
+        # here means the user still wants the overlay back.
         self._pause_after_id = None
-        # If the user toggled off during the pause, leave it off.
-        if not self.settings.get('overlay_enabled', False):
-            color = self.current_color()
-            if not color:
-                return
-            self.apply_overlay(color)
-        else:
-            self.overlay.show()
-            if self.toggle_button:
-                self.toggle_button.set_state(True)
-            self.tray.update_color(self._current_color_hex())
-            self.tray.rebuild_menu()
+        if self.overlay.is_active or not self.settings.get('overlay_enabled', False):
+            return
+        self.overlay.show()
+        if self.toggle_button:
+            self.toggle_button.set_state(True)
+        self.tray.update_color(self._current_color_hex())
+        self.tray.rebuild_menu()
+
+    def apply_schedule_state(self, on: bool) -> None:
+        """Called by the scheduler when the time window starts or ends."""
+        if on and not self.overlay.is_active and self.current_color():
+            logger.info("Schedule: turning overlay on")
+            self.toggle_overlay()
+        elif not on and self.overlay.is_active:
+            logger.info("Schedule: turning overlay off")
+            self.hide_overlay()
 
     def _restore_overlay_state(self) -> None:
         try:
@@ -2550,11 +2875,31 @@ class EaseViewApp:
     def _hide_to_tray(self) -> None:
         try:
             self.tray.create(self._current_color_hex())
+            if self.tray.icon is None:
+                # No tray (pystray missing or failed): withdrawing would leave
+                # the app unreachable, so fall back to the taskbar.
+                self.root.iconify()
+                return
             self.root.withdraw()
-            if self.settings.get('enable_notifications', True):
-                logger.info("Hidden to tray")
+            logger.info("Hidden to tray")
+            if (self.settings.get('enable_notifications', True)
+                    and not self._tray_hint_shown):
+                self._tray_hint_shown = True
+                self.tray.notify("EaseView is still running. "
+                                 "Click the tray icon to open it again.")
         except Exception as exc:
             logger.warning(f"Hide to tray failed: {exc}")
+
+    def _on_window_unmap(self, event: Optional[tk.Event] = None) -> None:
+        if event is None or event.widget is not self.root:
+            return
+        try:
+            if (self.root.state() == 'iconic'
+                    and self.settings.get('minimize_to_tray', True)
+                    and self.tray.icon is not None):
+                self.root.after(0, self._hide_to_tray)
+        except Exception:
+            pass
 
     def _on_window_map(self, _event: Optional[tk.Event] = None) -> None:
         # Refresh tray on restore from minimised state.
@@ -2600,52 +2945,66 @@ class EaseViewApp:
         # os._exit skips daemon-thread shutdown which sometimes blocks on Windows.
         os._exit(0)
 
-    def load_profile_by_name(self, name: str) -> None:
+    def load_profile_by_name(self, name: str, quiet: bool = False) -> None:
         if self.settings.load_profile(name):
-            self.active_preset = self.settings.get('preset_name')
-            self.custom_color = self.settings.get('custom_color')
-            self._update_selection_ui()
-            if hasattr(self, 'opacity_var'):
-                self.opacity_var.set(self.settings.get('opacity', 0.3) * 100)
-            if hasattr(self, 'density_var'):
-                self.density_var.set(self.settings.get('density', 1.0) * 100)
-            if self.settings.get('overlay_enabled'):
-                color = self.current_color()
-                if color:
-                    self.apply_overlay(color)
-            messagebox.showinfo("EaseView", f"Profile '{name}' loaded.")
+            self._refresh_from_settings()
+            color = self.current_color()
+            if color and (self.overlay.is_active
+                          or self.settings.get('overlay_enabled')):
+                self.apply_overlay(color)
+            else:
+                self.tray.update_color(color)
+            self.tray.rebuild_menu()
+            if quiet:
+                self.tray.notify(f"Profile '{name}' loaded.")
+            else:
+                messagebox.showinfo("EaseView", f"Profile '{name}' loaded.",
+                                    parent=self.root)
         else:
             messagebox.showerror("EaseView", f"Failed to load profile '{name}'.")
 
     def _save_profile_dialog(self) -> None:
-        name = simpledialog.askstring("Save profile", "Profile name:",
-                                       parent=self.root)
+        name = simpledialog.askstring(
+            "Save profile",
+            "Profile name (saves colour, strength and density):",
+            parent=self.root)
+        if name is None:
+            return
+        name = name.strip()
         if not name:
             return
+        if (name in self.settings.list_profiles()
+                and not messagebox.askyesno(
+                    "EaseView", f"Profile '{name}' already exists. Replace it?",
+                    parent=self.root)):
+            return
         if self.settings.save_profile(name):
+            self.settings.set('current_profile', name)
             messagebox.showinfo("EaseView", f"Profile '{name}' saved.")
             self.tray.rebuild_menu()
         else:
             messagebox.showerror("EaseView",
                                  "Could not save profile.\n"
-                                 "Use letters, numbers, dashes or spaces only.")
+                                 "Use letters, numbers, dashes or spaces only "
+                                 "(up to 64 characters).")
 
     def _load_profile_dialog(self) -> None:
         profiles = self.settings.list_profiles()
         if not profiles:
             messagebox.showinfo("EaseView", "No saved profiles found.")
             return
-        dlg = tk.Toplevel(self.root)
-        dlg.title("Load profile")
-        dlg.transient(self.root)
-        dlg.grab_set()
-        dlg.geometry("320x360")
+        dlg = self._make_dialog("Load profile")
         tk.Label(dlg, text="Select a profile:", font=self.fonts['section']
                  ).pack(pady=10)
-        lb = tk.Listbox(dlg, height=14)
+        lb = tk.Listbox(dlg, height=12, activestyle='dotbox')
         lb.pack(fill=tk.BOTH, expand=True, padx=10)
         for p in profiles:
             lb.insert(tk.END, p)
+        current = self.settings.get('current_profile')
+        idx = profiles.index(current) if current in profiles else 0
+        lb.selection_set(idx)
+        lb.activate(idx)
+        lb.see(idx)
 
         def do_load():
             sel = lb.curselection()
@@ -2655,30 +3014,36 @@ class EaseViewApp:
             dlg.destroy()
             self.load_profile_by_name(name)
 
+        lb.bind('<Double-Button-1>', lambda _e: do_load())
+        lb.bind('<Return>', lambda _e: do_load())
         bar = tk.Frame(dlg)
         bar.pack(fill=tk.X, pady=8, padx=10)
-        tk.Button(bar, text="Load", command=do_load).pack(side=tk.RIGHT, padx=4)
-        tk.Button(bar, text="Cancel", command=dlg.destroy).pack(side=tk.RIGHT)
+        tk.Button(bar, text="Load", width=10, command=do_load).pack(side=tk.RIGHT, padx=4)
+        tk.Button(bar, text="Cancel", width=10, command=dlg.destroy).pack(side=tk.RIGHT)
+        self._show_dialog(dlg, 320, 0)
+        lb.focus_set()
 
     def _manage_profiles_dialog(self) -> None:
-        dlg = tk.Toplevel(self.root)
-        dlg.title("Manage profiles")
-        dlg.transient(self.root)
-        dlg.grab_set()
-        dlg.geometry("360x400")
+        dlg = self._make_dialog("Manage profiles")
         tk.Label(dlg, text="Saved profiles:", font=self.fonts['section']
                  ).pack(pady=10)
-        lb = tk.Listbox(dlg, height=14)
+        lb = tk.Listbox(dlg, height=12, activestyle='dotbox')
         lb.pack(fill=tk.BOTH, expand=True, padx=10)
         for p in self.settings.list_profiles():
             lb.insert(tk.END, p)
+        if lb.size():
+            lb.selection_set(0)
+        else:
+            lb.insert(tk.END, "(no saved profiles)")
+            lb.configure(state='disabled')
 
         def do_delete():
             sel = lb.curselection()
             if not sel:
                 return
             name = lb.get(sel[0])
-            if messagebox.askyesno("Confirm", f"Delete profile '{name}'?"):
+            if messagebox.askyesno("Confirm", f"Delete profile '{name}'?",
+                                   parent=dlg):
                 if self.settings.delete_profile(name):
                     lb.delete(sel[0])
                     self.tray.rebuild_menu()
@@ -2687,8 +3052,10 @@ class EaseViewApp:
 
         bar = tk.Frame(dlg)
         bar.pack(fill=tk.X, pady=8, padx=10)
-        tk.Button(bar, text="Delete", command=do_delete).pack(side=tk.LEFT)
-        tk.Button(bar, text="Close", command=dlg.destroy).pack(side=tk.RIGHT)
+        tk.Button(bar, text="Delete", width=10, command=do_delete).pack(side=tk.LEFT)
+        tk.Button(bar, text="Close", width=10, command=dlg.destroy).pack(side=tk.RIGHT)
+        lb.bind('<Delete>', lambda _e: do_delete())
+        self._show_dialog(dlg, 340, 0)
 
     def _reset_to_defaults(self) -> None:
         if not messagebox.askyesno(
@@ -2697,19 +3064,18 @@ class EaseViewApp:
                 "Saved profiles are kept. The overlay will be hidden."):
             return
         try:
+            self._cancel_pause()
             self.overlay.destroy()
+            was_startup = self.settings.get('auto_startup', False)
             self.settings.settings = SettingsManager._deep_copy(
                 SettingsManager.DEFAULT_SETTINGS)
             self.settings.save()
+            if was_startup:
+                WindowsIntegration.set_startup(False)
+            self._reapply_runtime_settings()
             self.active_preset = None
             self.custom_color = None
-            self._update_selection_ui()
-            if hasattr(self, 'opacity_var'):
-                self.opacity_var.set(self.settings.get('opacity', 0.3) * 100)
-            if hasattr(self, 'density_var'):
-                self.density_var.set(self.settings.get('density', 1.0) * 100)
-            if self.toggle_button:
-                self.toggle_button.set_state(False)
+            self._rebuild_ui()
             self.tray.update_color(None)
             self.tray.rebuild_menu()
             messagebox.showinfo("EaseView", "Settings reset to defaults.")
@@ -2740,21 +3106,24 @@ class EaseViewApp:
             parent=self.root)
         if not path: return
         if self.settings.import_settings(path):
-            messagebox.showinfo("EaseView",
-                                "Settings imported successfully.\n"
-                                "Some changes need a restart to take effect.")
-            self.active_preset = self.settings.get('preset_name')
-            self.custom_color = self.settings.get('custom_color')
-            self._update_selection_ui()
+            self._reapply_runtime_settings()
+            WindowsIntegration.set_startup(
+                self.settings.get('auto_startup', False),
+                self.settings.get('start_minimized', False))
+            self._refresh_from_settings()
+            self._rebuild_ui()
+            color = self.current_color()
+            if color and self.settings.get('overlay_enabled'):
+                self.apply_overlay(color)
+            elif self.overlay.is_active:
+                self.hide_overlay()
+            self.tray.rebuild_menu()
+            messagebox.showinfo("EaseView", "Settings imported successfully.")
         else:
             messagebox.showerror("EaseView", "Failed to import settings.")
 
     def _startup_options(self) -> None:
-        dlg = tk.Toplevel(self.root)
-        dlg.title("Startup options")
-        dlg.transient(self.root)
-        dlg.grab_set()
-        dlg.geometry("360x250")
+        dlg = self._make_dialog("Startup options")
 
         auto_v   = tk.BooleanVar(value=self.settings.get('auto_startup', False))
         min_v    = tk.BooleanVar(value=self.settings.get('start_minimized', False))
@@ -2769,6 +3138,10 @@ class EaseViewApp:
         ):
             tk.Checkbutton(dlg, text=text, variable=var,
                            font=self.fonts['body']).pack(anchor='w', padx=20, pady=4)
+        if not WIN32_AVAILABLE:
+            tk.Label(dlg, text="Start with Windows needs the 'pywin32' package.",
+                     fg=self.colours['text_secondary'],
+                     font=self.fonts['footer']).pack(anchor='w', padx=20)
 
         def save():
             self.settings.set('auto_startup',     auto_v.get(), save_immediately=False)
@@ -2776,23 +3149,24 @@ class EaseViewApp:
             self.settings.set('minimize_to_tray', min_tray.get(), save_immediately=False)
             self.settings.set('close_to_tray',    close_tray.get(), save_immediately=False)
             self.settings.save()
-            WindowsIntegration.set_startup(auto_v.get(), min_v.get())
-            messagebox.showinfo("EaseView", "Startup settings saved.")
+            if (not WindowsIntegration.set_startup(auto_v.get(), min_v.get())
+                    and auto_v.get()):
+                messagebox.showwarning(
+                    "EaseView", "Settings saved, but EaseView could not add "
+                    "itself to Windows startup. See the log file.", parent=dlg)
             dlg.destroy()
 
         bar = tk.Frame(dlg)
         bar.pack(fill=tk.X, pady=8, padx=10, side=tk.BOTTOM)
-        tk.Button(bar, text="Save", command=save).pack(side=tk.RIGHT, padx=4)
-        tk.Button(bar, text="Cancel", command=dlg.destroy).pack(side=tk.RIGHT)
+        tk.Button(bar, text="Save", width=10, command=save).pack(side=tk.RIGHT, padx=4)
+        tk.Button(bar, text="Cancel", width=10, command=dlg.destroy).pack(side=tk.RIGHT)
+        dlg.bind('<Return>', lambda _e: save())
+        self._show_dialog(dlg, 360, 0)
 
     def _hotkey_settings(self) -> None:
-        dlg = tk.Toplevel(self.root)
-        dlg.title("Hotkey settings")
-        dlg.transient(self.root)
-        dlg.grab_set()
-        dlg.geometry("520x430")
+        dlg = self._make_dialog("Hotkey settings")
 
-        tk.Label(dlg, justify='left', wraplength=480,
+        tk.Label(dlg, justify='left', wraplength=int(460 * UI_SCALE),
                  font=self.fonts['body'],
                  text=("In-window shortcuts (Ctrl+Shift+O, Esc, Ctrl+Shift+arrows) "
                        "always work when EaseView is focused. They need no extras.\n\n"
@@ -2849,28 +3223,34 @@ class EaseViewApp:
                 norm = HotkeyManager.tk_to_keyboard(v.get().strip())
                 if norm:
                     new_map[k] = norm
+            combos = list(new_map.values())
+            if len(combos) != len(set(combos)):
+                messagebox.showerror("EaseView",
+                                     "Two actions share the same hotkey.",
+                                     parent=dlg)
+                return
             self.settings.set('hotkeys', new_map, save_immediately=False)
             self.settings.set('enable_global_hotkeys', global_v.get())
-            for name in list(self.hotkey_manager.registered):
-                self.hotkey_manager.unregister(name)
-            self._setup_hotkeys_from_settings()
-            messagebox.showinfo("EaseView",
-                                "Hotkey settings saved.\n"
-                                "In-window shortcuts work immediately; "
-                                "global hotkeys may require admin privileges.")
+            self.hotkey_manager.stop()
+            failed = self._setup_hotkeys_from_settings()
+            if failed:
+                labels = dict(rows)
+                messagebox.showwarning(
+                    "EaseView",
+                    "These global hotkeys could not be registered:\n\n  "
+                    + "\n  ".join(labels.get(n, n) for n in failed)
+                    + "\n\nCheck the key names, or run EaseView as "
+                      "administrator.", parent=dlg)
             dlg.destroy()
 
         bar = tk.Frame(dlg)
         bar.pack(fill=tk.X, pady=10, padx=12, side=tk.BOTTOM)
-        tk.Button(bar, text="Save", command=save).pack(side=tk.RIGHT, padx=4)
-        tk.Button(bar, text="Cancel", command=dlg.destroy).pack(side=tk.RIGHT)
+        tk.Button(bar, text="Save", width=10, command=save).pack(side=tk.RIGHT, padx=4)
+        tk.Button(bar, text="Cancel", width=10, command=dlg.destroy).pack(side=tk.RIGHT)
+        self._show_dialog(dlg, 480, 0)
 
     def _schedule_settings(self) -> None:
-        dlg = tk.Toplevel(self.root)
-        dlg.title("Schedule overlay")
-        dlg.transient(self.root)
-        dlg.grab_set()
-        dlg.geometry("440x420")
+        dlg = self._make_dialog("Schedule overlay")
 
         sch = self.settings.get('schedule', {})
         enabled_v   = tk.BooleanVar(value=sch.get('enabled', False))
@@ -2878,9 +3258,8 @@ class EaseViewApp:
         start_v     = tk.StringVar(value=sch.get('start_time', '09:00'))
         end_v       = tk.StringVar(value=sch.get('end_time', '17:00'))
         loc = sch.get('location', {})
-        lat_v = tk.DoubleVar(value=loc.get('latitude', 55.9533))
-        lon_v = tk.DoubleVar(value=loc.get('longitude', -3.1883))
-        tz_v  = tk.StringVar(value=loc.get('timezone', 'Europe/London'))
+        lat_v = tk.StringVar(value=str(loc.get('latitude', 55.9533)))
+        lon_v = tk.StringVar(value=str(loc.get('longitude', -3.1883)))
 
         tk.Checkbutton(dlg, text="Enable scheduled overlay", variable=enabled_v,
                        font=self.fonts['body']).pack(anchor='w', padx=14, pady=6)
@@ -2908,49 +3287,60 @@ class EaseViewApp:
         lf = tk.LabelFrame(dlg, text="Location (for sunset mode)")
         lf.pack(fill=tk.X, padx=12, pady=6)
         for r, (label, var) in enumerate((("Latitude:", lat_v),
-                                          ("Longitude:", lon_v),
-                                          ("Timezone:", tz_v))):
+                                          ("Longitude:", lon_v))):
             tk.Label(lf, text=label, font=self.fonts['body']
                      ).grid(row=r, column=0, padx=6, pady=2, sticky='w')
             tk.Entry(lf, textvariable=var, width=20).grid(row=r, column=1,
                                                           padx=6, pady=2, sticky='w')
+        tk.Label(lf, text="Times follow this PC's clock (GMT / BST).",
+                 font=self.fonts['footer'], fg=self.colours['text_secondary']
+                 ).grid(row=2, column=0, columnspan=2, padx=6, pady=(0, 4), sticky='w')
 
         def save():
+            start, end = start_v.get().strip(), end_v.get().strip()
             try:
                 if mode_v.get() == 'fixed':
-                    dt_time.fromisoformat(start_v.get())
-                    dt_time.fromisoformat(end_v.get())
+                    dt_time.fromisoformat(start)
+                    dt_time.fromisoformat(end)
             except ValueError:
-                messagebox.showerror("EaseView", "Invalid time. Use HH:MM (24-hour).")
+                messagebox.showerror("EaseView", "Invalid time. Use HH:MM (24-hour).",
+                                     parent=dlg)
+                return
+            try:
+                lat, lon = float(lat_v.get()), float(lon_v.get())
+                if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+                    raise ValueError
+            except ValueError:
+                messagebox.showerror("EaseView",
+                                     "Latitude must be -90 to 90 and longitude "
+                                     "-180 to 180 (e.g. Ayr: 55.46, -4.63).",
+                                     parent=dlg)
                 return
             self.settings.set('schedule', {
                 'enabled': enabled_v.get(),
                 'mode': mode_v.get(),
-                'start_time': start_v.get(),
-                'end_time': end_v.get(),
+                'start_time': start,
+                'end_time': end,
                 'location': {
-                    'latitude': float(lat_v.get()),
-                    'longitude': float(lon_v.get()),
-                    'timezone': str(tz_v.get()),
+                    'latitude': lat,
+                    'longitude': lon,
+                    'timezone': loc.get('timezone', 'Europe/London'),
                 },
             })
             self.schedule_manager.stop()
             if enabled_v.get():
                 self.schedule_manager.start()
-            messagebox.showinfo("EaseView", "Schedule saved.")
             dlg.destroy()
 
         bar = tk.Frame(dlg)
         bar.pack(fill=tk.X, pady=8, padx=12, side=tk.BOTTOM)
-        tk.Button(bar, text="Save", command=save).pack(side=tk.RIGHT, padx=4)
-        tk.Button(bar, text="Cancel", command=dlg.destroy).pack(side=tk.RIGHT)
+        tk.Button(bar, text="Save", width=10, command=save).pack(side=tk.RIGHT, padx=4)
+        tk.Button(bar, text="Cancel", width=10, command=dlg.destroy).pack(side=tk.RIGHT)
+        dlg.bind('<Return>', lambda _e: save())
+        self._show_dialog(dlg, 420, 0)
 
     def _accessibility_settings(self) -> None:
-        dlg = tk.Toplevel(self.root)
-        dlg.title("Accessibility")
-        dlg.transient(self.root)
-        dlg.grab_set()
-        dlg.geometry("400x320")
+        dlg = self._make_dialog("Accessibility")
 
         acc = self.settings.get('accessibility', {})
         scale_v = tk.DoubleVar(value=acc.get('font_scale', 1.0))
@@ -2967,12 +3357,12 @@ class EaseViewApp:
                  variable=scale_v,
                  command=lambda v: scale_label.config(text=f"Font scale: {float(v):.1f}x")
                  ).pack(fill=tk.X, padx=24)
-        tk.Checkbutton(dlg, text="High contrast mode (uses dark palette)",
+        tk.Checkbutton(dlg, text="High contrast (black, white and yellow)",
                        variable=high_v, font=self.fonts['body']
                        ).pack(anchor='w', padx=20, pady=4)
         tk.Checkbutton(dlg, text="Enable fade animations", variable=fade_v,
                        font=self.fonts['body']).pack(anchor='w', padx=20, pady=4)
-        tk.Checkbutton(dlg, text="Enable in-app notifications", variable=notif_v,
+        tk.Checkbutton(dlg, text="Show tray notifications", variable=notif_v,
                        font=self.fonts['body']).pack(anchor='w', padx=20, pady=4)
         tk.Checkbutton(dlg, text="Check for updates on startup", variable=upd_v,
                        font=self.fonts['body']).pack(anchor='w', padx=20, pady=4)
@@ -2983,7 +3373,7 @@ class EaseViewApp:
         def save():
             self.settings.set('accessibility',
                               {'high_contrast': high_v.get(),
-                               'font_scale': scale_v.get()},
+                               'font_scale': round(float(scale_v.get()), 1)},
                               save_immediately=False)
             self.settings.set('enable_fade', fade_v.get(), save_immediately=False)
             self.settings.set('enable_notifications', notif_v.get(), save_immediately=False)
@@ -2991,14 +3381,14 @@ class EaseViewApp:
             self.settings.set('include_prereleases', pre_v.get(), save_immediately=False)
             self.settings.save()
             self.overlay.enable_fade = fade_v.get()
-            messagebox.showinfo("EaseView",
-                                "Settings saved. Font scaling takes effect after restart.")
             dlg.destroy()
+            self._rebuild_ui()  # font scale and contrast apply straight away
 
         bar = tk.Frame(dlg)
         bar.pack(fill=tk.X, pady=8, padx=12, side=tk.BOTTOM)
-        tk.Button(bar, text="Save", command=save).pack(side=tk.RIGHT, padx=4)
-        tk.Button(bar, text="Cancel", command=dlg.destroy).pack(side=tk.RIGHT)
+        tk.Button(bar, text="Save", width=10, command=save).pack(side=tk.RIGHT, padx=4)
+        tk.Button(bar, text="Cancel", width=10, command=dlg.destroy).pack(side=tk.RIGHT)
+        self._show_dialog(dlg, 380, 0)
 
     def check_updates_async(self, manual: bool) -> None:
         if not REQUESTS_AVAILABLE:
@@ -3017,8 +3407,8 @@ class EaseViewApp:
             except Exception as exc:
                 logger.warning(f"Update check exception: {exc}")
                 result = None
-            self.root.after(0, lambda: self._on_update_result(result, manual,
-                                                                skip_version))
+            self.call_in_main(lambda: self._on_update_result(result, manual,
+                                                             skip_version))
 
         threading.Thread(target=worker, daemon=True,
                          name="EaseViewUpdate").start()
@@ -3040,6 +3430,7 @@ class EaseViewApp:
         new_v = result['latest_version']
         if not manual and new_v == skip_version:
             return
+        self._pending_update = (new_v, result.get('url', ''))
         if self.update_banner is not None:
             self.update_banner.show_for(new_v, result.get('url', ''), VERSION)
             self.update_banner.pack(fill=tk.X)
@@ -3055,6 +3446,7 @@ class EaseViewApp:
                     pass
 
     def _on_update_skipped(self, version: str) -> None:
+        self._pending_update = None
         self.settings.set('skipped_version', version)
         logger.info(f"User skipped version {version}")
 
@@ -3064,9 +3456,19 @@ class EaseViewApp:
             f"EaseView - Screen Colour Overlay\n\n"
             f"Version {VERSION}\n"
             f"Portable mode: {'yes' if PORTABLE_MODE else 'no'}\n"
-            f"Dark mode: {'yes' if WindowsIntegration.is_dark_mode() else 'no'}\n\n"
+            f"Settings folder: {SETTINGS_DIR}\n"
+            f"Optional features: {self._feature_summary()}\n\n"
             f"Project: https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}\n"
             f"Contact: Ross.paxton@south-ayrshire.gov.uk")
+
+    @staticmethod
+    def _feature_summary() -> str:
+        parts = [name for name, ok in (("win32", WIN32_AVAILABLE),
+                                       ("tray", PYSTRAY_AVAILABLE),
+                                       ("global hotkeys", KEYBOARD_AVAILABLE),
+                                       ("update checks", REQUESTS_AVAILABLE),
+                                       ("sunset schedule", ASTRAL_AVAILABLE)) if ok]
+        return ", ".join(parts) or "none"
 
     def show_help(self) -> None:
         messagebox.showinfo(
@@ -3075,7 +3477,9 @@ class EaseViewApp:
             "2. Adjust 'Overlay strength' for transparency.\n"
             "3. Adjust 'Colour density' for vibrancy.\n"
             "4. Use the toggle, the tray icon, or Ctrl+Shift+O to enable.\n"
-            "5. Press Esc at any time to instantly hide the overlay.\n\n"
+            "5. Press Esc in this window to instantly hide the overlay.\n"
+            "6. Closing the window keeps EaseView in the system tray; "
+            "use File > Exit or the tray menu to quit.\n\n"
             "EaseView remembers your settings across sessions and across "
             "monitor changes.")
 
@@ -3102,7 +3506,8 @@ class EaseViewApp:
                 if not os.path.exists(path):
                     Path(path).touch(exist_ok=True)
             if os.name == "nt":
-                os.startfile(target)  # type: ignore[attr-defined]
+                # Open the file itself (e.g. the log in Notepad), not just its folder.
+                os.startfile(path if os.path.isfile(path) else target)  # type: ignore[attr-defined]
             else:
                 import webbrowser
                 webbrowser.open('file://' + os.path.abspath(target))

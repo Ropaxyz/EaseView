@@ -14,10 +14,11 @@ It covers every monitor with a click-through overlay you can tweak for strength 
 - Opacity and density sliders with quick presets
 - System tray icon (state-aware: shows the active colour, dims when off)
 - Pause overlay for 10s / 30s / 1 min / 5 min via the tray
-- Settings profiles - save / load / export / import
-- Schedule (fixed times, including overnight, or sunset-to-sunrise via `astral`)
+- Profiles for different looks (e.g. Reading, Evening) - colour, strength and density only; startup, hotkeys and schedule stay as they are
+- Export / import all settings
+- Schedule (fixed times, including overnight, or sunset-to-sunrise via `astral`, following the PC's clock including BST). You can still switch the overlay on or off by hand during a scheduled period.
 - Optional global hotkeys (admin needed on Windows; opt-in)
-- Light / dark / follow-Windows theme
+- Light / dark / follow-Windows theme, plus a high-contrast option. Theme and font size apply straight away
 - Portable mode (drop a `portable.ini` next to the exe)
 - Update banner that checks GitHub releases on startup
 - Atomic settings writes; corrupt files are backed up and reset
@@ -59,10 +60,10 @@ python screen_overlay.py --version
 | `Ctrl+Shift+O` | Toggle overlay |
 | `Ctrl+Shift+↑ / ↓` | Strength up / down |
 | `Ctrl+Shift+→ / ←` | Density up / down |
-| `Esc` | Hide overlay |
+| `Esc` | Hide overlay (closes the dialog when you're in one) |
 | `Tab` / `Enter` / `Space` | Navigate / activate |
 
-These work whenever the EaseView window is focused. **Global** hotkeys (active while EaseView is in the tray) are off by default - enable them in `Settings → Hotkey settings…`. The `keyboard` package needs admin on Windows.
+These work whenever the main EaseView window is focused. **Global** hotkeys (active while EaseView is in the tray) are off by default - enable them in `Settings → Hotkey settings…`. The `keyboard` package needs admin on Windows.
 
 ## Files
 
